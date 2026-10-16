@@ -1,0 +1,16 @@
+{
+  "name": "fastcopy",
+  "version": "0.1.0",
+  "description": "在手机和电脑之间快速传输文字和文件（局域网，无需安装 App）",
+  "main": "server.js",
+  "bin": { "fastcopy": "server.js" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0"
+  },
+  "license": "MIT"
+}
