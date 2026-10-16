@@ -10,14 +10,64 @@ const { systemClipboard } = require('./clipboard');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const MAX_ITEMS = 200;
+const MAX_CLIPBOARD_IMAGE = 50 * 1024 * 1024;
+
+// Identify an image by its magic bytes; the phone's declared type and file name are often generic.
+function sniffImage(head) {
+  const ascii = (a, b) => head.toString('latin1', a, b);
+  if (head.length >= 8 && head.readUInt32BE(0) === 0x89504e47) return { mime: 'image/png', ext: '.png', clipboard: true };
+  if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return { mime: 'image/jpeg', ext: '.jpg', clipboard: true };
+  if (ascii(0, 4) === 'GIF8') return { mime: 'image/gif', ext: '.gif', clipboard: true };
+  if (ascii(0, 2) === 'BM') return { mime: 'image/bmp', ext: '.bmp', clipboard: true };
+  if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') return { mime: 'image/webp', ext: '.webp', clipboard: false };
+  if (ascii(4, 8) === 'ftyp' && /^(heic|heix|hevc|mif1|msf1)$/.test(ascii(8, 12))) return { mime: 'image/heic', ext: '.heic', clipboard: false };
+  return null;
+}
+
+const SAME_EXT = { '.jpeg': '.jpg', '.jpe': '.jpg', '.heif': '.heic' };
+
+function imageName(name, image, provided) {
+  if (!provided) return `图片-${timestamp()}${image.ext}`;
+  const ext = path.extname(name).toLowerCase();
+  if ((SAME_EXT[ext] || ext) === image.ext) return name;
+  return path.basename(name, path.extname(name)) + image.ext;
+}
+
+function timestamp(date = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`;
+}
+
+function sha1(buf) {
+  return crypto.createHash('sha1').update(buf).digest('hex');
+}
+
+// Copy to dir under name, adding " (1)", " (2)"... instead of overwriting an existing file.
+async function saveCopy(src, dir, name) {
+  await fs.promises.mkdir(dir, { recursive: true });
+  const ext = path.extname(name);
+  const stem = path.basename(name, ext);
+  for (let n = 0; ; n++) {
+    const dest = path.join(dir, n ? `${stem} (${n})${ext}` : name);
+    try {
+      await fs.promises.copyFile(src, dest, fs.constants.COPYFILE_EXCL);
+      return dest;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+    }
+  }
+}
 
 function createApp(options = {}) {
   const token = options.token || crypto.randomBytes(6).toString('hex');
   const uploadDir = options.uploadDir || path.join(__dirname, 'uploads');
   const maxUploadBytes = options.maxUploadBytes || 2 * 1024 * 1024 * 1024; // 2 GB
-  // { read(), write(text) } for the computer's clipboard, or null to disable syncing.
+  // { read(), write(text), writeImage?(buf) } for the computer's clipboard, or null to disable syncing.
   const clipboard = options.clipboard === undefined ? systemClipboard() : options.clipboard;
   const clipboardInterval = options.clipboardInterval || 800;
+  // Files sent from other devices are also copied here (null = don't keep copies).
+  const saveDir = options.saveDir || null;
+  const isLocalRequest = options.isLocalRequest || fromThisComputer;
 
   fs.rmSync(uploadDir, { recursive: true, force: true });
   fs.mkdirSync(uploadDir, { recursive: true });
@@ -51,27 +101,41 @@ function createApp(options = {}) {
   }
 
   // --- Computer clipboard sync -------------------------------------------
-  // Copying on the computer adds a text item; text sent from any device lands on the computer's clipboard.
-  let lastClip = null; // last clipboard text we saw or wrote, so we don't echo our own writes
+  // Copying text or an image on the computer adds an item; text and images sent from any device
+  // land on the computer's clipboard.
+  let lastClip = null; // key of the last clipboard content we saw or wrote, so we don't echo our own writes
   let polling = false;
   let clipTimer = null;
+
+  const clipKey = (clip) => (typeof clip === 'string' ? 'text:' + clip : 'image:' + sha1(clip.image));
 
   async function pollClipboard() {
     if (polling) return;
     polling = true;
     try {
-      const text = await clipboard.read();
+      const clip = await clipboard.read();
+      if (clip == null) return;
+      const key = clipKey(clip);
       if (lastClip === null) {
-        lastClip = text; // don't publish whatever happened to be on the clipboard at startup
-      } else if (text !== lastClip) {
-        lastClip = text;
-        const latest = latestText();
-        if (text.trim() && (!latest || latest.text !== text)) {
-          addItem({ id: newId(), type: 'text', text, from: '电脑剪贴板', time: Date.now() });
+        lastClip = key; // don't publish whatever happened to be on the clipboard at startup
+      } else if (key !== lastClip) {
+        lastClip = key;
+        if (typeof clip === 'string') {
+          const latest = latestText();
+          if (clip.trim() && (!latest || latest.text !== clip)) {
+            addItem({ id: newId(), type: 'text', text: clip, from: '电脑剪贴板', time: Date.now() });
+          }
+        } else if (clip.image.length) {
+          const id = newId();
+          await fs.promises.writeFile(path.join(uploadDir, id), clip.image);
+          addItem({
+            id, type: 'file', name: `电脑截图-${timestamp()}.png`, size: clip.image.length, mime: 'image/png',
+            from: '电脑剪贴板', time: Date.now(),
+          });
         }
       }
     } catch {
-      // Clipboard temporarily unavailable (locked, non-text content, ...): try again next tick.
+      // Clipboard temporarily unavailable (locked by another app, ...): try again next tick.
     } finally {
       polling = false;
     }
@@ -79,8 +143,44 @@ function createApp(options = {}) {
 
   function writeClipboard(text) {
     if (!clipboard) return;
-    lastClip = text;
+    lastClip = clipKey(text);
     clipboard.write(text).catch((err) => console.error('写入电脑剪贴板失败：', err.message));
+  }
+
+  function writeClipboardImage(data) {
+    if (!clipboard || !clipboard.writeImage) return;
+    lastClip = clipKey({ image: data });
+    clipboard.writeImage(data).catch((err) => console.error('图片写入电脑剪贴板失败：', err.message));
+  }
+
+  // Requests from the computer's own browser shouldn't be copied back onto its clipboard or into saveDir.
+  function fromThisComputer(req) {
+    const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+    return ip === '127.0.0.1' || ip === '::1' || Object.values(os.networkInterfaces()).flat().some((a) => a && a.address === ip);
+  }
+
+  // A device sent a file: fix up image names/types, put images on the computer's clipboard, keep a copy.
+  async function receivedFile(item, req, nameProvided) {
+    const file = path.join(uploadDir, item.id);
+    const fh = await fs.promises.open(file, 'r');
+    const head = Buffer.alloc(16);
+    try {
+      await fh.read(head, 0, 16, 0);
+    } finally {
+      await fh.close();
+    }
+    const image = sniffImage(head);
+    if (image) {
+      item.mime = image.mime;
+      item.name = imageName(item.name, image, nameProvided);
+    }
+    if (isLocalRequest(req)) return;
+    if (image && image.clipboard && item.size <= MAX_CLIPBOARD_IMAGE) {
+      writeClipboardImage(await fs.promises.readFile(file));
+    }
+    if (saveDir) {
+      saveCopy(file, saveDir, item.name).catch((err) => console.error('保存文件失败：', err.message));
+    }
   }
 
   if (clipboard) {
@@ -90,6 +190,15 @@ function createApp(options = {}) {
 
   function latestText() {
     for (let i = items.length - 1; i >= 0; i--) if (items[i].type === 'text') return items[i];
+    return null;
+  }
+
+  // Newest text or image, whichever came last: what a phone shortcut should put on its clipboard.
+  function latestClip() {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (it.type === 'text' || (it.type === 'file' && it.mime.startsWith('image/'))) return it;
+    }
     return null;
   }
 
@@ -191,6 +300,23 @@ function createApp(options = {}) {
       return res.end(item.text);
     }
 
+    // Like /api/latest, but returns the image itself when an image is newer than the latest text.
+    if (req.method === 'GET' && pathname === '/api/clip') {
+      const item = latestClip();
+      if (!item) return res.writeHead(204).end();
+      if (item.type === 'text') {
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+        return res.end(item.text);
+      }
+      res.writeHead(200, {
+        'Content-Type': item.mime,
+        'Content-Length': item.size,
+        'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(item.name)}`,
+        'Cache-Control': 'no-store',
+      });
+      return fs.createReadStream(path.join(uploadDir, item.id)).pipe(res);
+    }
+
     if (req.method === 'GET' && pathname === '/events') {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
@@ -221,6 +347,7 @@ function createApp(options = {}) {
     }
 
     if (req.method === 'POST' && pathname === '/api/upload') {
+      const nameProvided = Boolean(path.basename(url.searchParams.get('name') || ''));
       const name = path.basename(url.searchParams.get('name') || 'file').slice(0, 255) || 'file';
       const declared = Number(req.headers['content-length'] || 0);
       if (declared > maxUploadBytes) return sendJson(res, 413, { error: '文件过大' });
@@ -245,9 +372,9 @@ function createApp(options = {}) {
         out.destroy();
         fs.rm(dest, { force: true }, () => {});
       });
-      out.on('finish', () => {
+      out.on('finish', async () => {
         if (aborted) return;
-        const item = addItem({
+        const item = {
           id,
           type: 'file',
           name,
@@ -256,8 +383,13 @@ function createApp(options = {}) {
           from: deviceName(req),
           client: clientId(req),
           time: Date.now(),
-        });
-        sendJson(res, 201, item);
+        };
+        try {
+          await receivedFile(item, req, nameProvided);
+        } catch (err) {
+          console.error('处理上传文件失败：', err.message);
+        }
+        sendJson(res, 201, addItem(item));
       });
       req.pipe(out);
       return;
@@ -295,9 +427,12 @@ function createApp(options = {}) {
     });
   });
 
-  server.on('close', () => clearInterval(clipTimer));
+  server.on('close', () => {
+    clearInterval(clipTimer);
+    if (clipboard && clipboard.close) clipboard.close();
+  });
 
-  return { server, token, clipboardSync: Boolean(clipboard) };
+  return { server, token, clipboardSync: Boolean(clipboard), clipboardImages: Boolean(clipboard && clipboard.writeImage) };
 }
 
 // Keep the token across restarts so bookmarks and phone shortcuts keep working.
@@ -345,18 +480,25 @@ function lanAddresses(interfaces = os.networkInterfaces()) {
 if (require.main === module) {
   const port = Number(process.env.PORT) || 8080;
   const noClipboard = process.env.FASTCOPY_CLIPBOARD === '0';
-  const { server, token, clipboardSync } = createApp({ token: loadToken(), clipboard: noClipboard ? null : undefined });
+  const saveEnv = process.env.FASTCOPY_SAVE_DIR;
+  const saveDir = saveEnv === '0' ? null : saveEnv || path.join(os.homedir(), 'Downloads', 'FastCopy');
+  const { server, token, clipboardSync, clipboardImages } = createApp({ token: loadToken(), clipboard: noClipboard ? null : undefined, saveDir });
   server.listen(port, '0.0.0.0', () => {
     const ips = lanAddresses();
     const urls = (ips.length ? ips : ['localhost']).map((ip) => `http://${ip}:${port}/?token=${token}`);
     console.log('\nFastCopy 已启动 🚀  手机与电脑需连接同一 Wi-Fi\n');
     urls.forEach((u) => console.log('  ' + u));
     if (clipboardSync) {
-      console.log('\n📋 电脑剪贴板同步已开启：电脑上复制的文字会自动出现在手机上，手机发来的文字会自动进入电脑剪贴板');
+      const what = clipboardImages ? '文字和图片' : '文字';
+      console.log(`\n📋 电脑剪贴板同步已开启：电脑上复制的${what}会自动出现在手机上，手机发来的${what}会自动进入电脑剪贴板`);
     } else if (!noClipboard) {
       console.log('\n⚠️  未找到剪贴板工具，剪贴板同步未开启（Linux 请安装 xclip 或 wl-clipboard）');
     }
-    console.log(`\n手机快捷指令地址（获取最新文字）：\n  ${urls[0].replace('/?token=', '/api/latest?token=')}`);
+    if (saveDir) console.log(`\n📁 手机发来的文件会另存到：${saveDir}`);
+    console.log('\n手机快捷指令地址：');
+    console.log(`  获取最新文字或图片：${urls[0].replace('/?token=', '/api/clip?token=')}`);
+    console.log(`  发送文字到电脑（POST）：${urls[0].replace('/?token=', '/api/text?token=')}`);
+    console.log(`  发送图片/文件到电脑（POST）：${urls[0].replace('/?token=', '/api/upload?token=')}`);
     console.log('\n用手机扫描二维码打开：\n');
     try {
       require('qrcode-terminal').generate(urls[0], { small: true });
