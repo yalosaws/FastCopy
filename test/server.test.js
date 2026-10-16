@@ -13,7 +13,7 @@ const auth = { Cookie: `fc_token=${token}` };
 
 before(async () => {
   const uploadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fastcopy-'));
-  ({ server } = createApp({ token, uploadDir, maxUploadBytes: 1024 }));
+  ({ server } = createApp({ token, uploadDir, maxUploadBytes: 1024, clipboard: null }));
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
 });
