@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FastCopy</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #fff; --text: #1d1f23; --muted: #6b7280;
+    --border: #e3e5e9; --accent: #2563eb; --accent-text: #fff; --danger: #dc2626;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111316; --card: #1b1e23; --text: #e8eaed; --muted: #9aa0a6;
+      --border: #2c3036; --accent: #3b82f6; --accent-text: #fff; --danger: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 16px 16px 48px; }
+  header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  h1 { font-size: 20px; margin: 0; }
+  .status { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); }
+  .dot.on { background: #16a34a; }
+  .composer { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
+  .composer.drag { border-color: var(--accent); outline: 2px dashed var(--accent); }
+  textarea {
+    width: 100%; min-height: 96px; resize: vertical; border: 0; outline: 0; background: transparent;
+    color: var(--text); font: inherit;
+  }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+  .hint { font-size: 12px; color: var(--muted); flex: 1; min-width: 120px; }
+  button, .btn {
+    appearance: none; border: 1px solid var(--border); background: var(--card); color: var(--text);
+    padding: 7px 14px; border-radius: 8px; font: inherit; font-size: 14px; cursor: pointer; text-decoration: none;
+  }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button.link { border: 0; background: none; color: var(--muted); padding: 4px 6px; }
+  .uploads:empty { display: none; }
+  .uploads { margin-top: 8px; }
+  .progress { font-size: 13px; color: var(--muted); }
+  .progress progress { width: 100%; height: 6px; }
+  .list-head { display: flex; justify-content: space-between; align-items: center; margin: 20px 0 8px; }
+  .list-head h2 { font-size: 15px; margin: 0; color: var(--muted); font-weight: 500; }
+  ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+  li { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 12px; }
+  .meta { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .text { white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
+  .file { display: flex; gap: 12px; align-items: center; }
+  .file img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; flex: none; }
+  .fname { word-break: break-all; }
+  .actions { display: flex; gap: 8px; margin-top: 10px; }
+  .empty { text-align: center; color: var(--muted); padding: 32px 0; }
+  .incoming {
+    display: none; position: sticky; top: 8px; z-index: 5; width: 100%; margin-bottom: 12px; text-align: left;
+    background: var(--accent); color: var(--accent-text); border: 0; border-radius: 12px; padding: 14px 16px;
+    box-shadow: 0 6px 20px rgba(37, 99, 235, .35);
+  }
+  .incoming.show { display: block; }
+  .incoming b { display: block; font-size: 16px; margin-bottom: 4px; }
+  .incoming span { display: block; opacity: .9; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sync { font-size: 12px; color: var(--muted); margin: 8px 2px 0; }
+  .toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #111; color: #fff;
+    padding: 8px 16px; border-radius: 999px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none;
+  }
+  .toast.show { opacity: .9; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>FastCopy</h1>
+    <span class="status"><span id="dot" class="dot"></span><span id="status">连接中…</span></span>
+  </header>
+
+  <button id="incoming" class="incoming"><b>📋 收到新文字，点击复制</b><span id="incoming-text"></span></button>
+
+  <section id="composer" class="composer">
+    <textarea id="text" placeholder="输入或粘贴文字；也可以直接粘贴 / 拖入文件"></textarea>
+    <div class="row">
+      <span class="hint">Ctrl/⌘ + Enter 发送</span>
+      <button id="pick">📎 文件</button>
+      <button id="send" class="primary">发送</button>
+      <input id="file" type="file" multiple hidden>
+    </div>
+    <div id="uploads" class="uploads"></div>
+  </section>
+  <p id="sync" class="sync" hidden>📋 电脑剪贴板同步已开启：在电脑上复制，这里自动出现；从这里发送，电脑上直接 Ctrl+V</p>
+
+  <div class="list-head">
+    <h2>最近记录</h2>
+    <button id="clear" class="link">清空</button>
+  </div>
+  <ul id="list"></ul>
+  <p id="empty" class="empty">还没有内容，从任一设备发送试试</p>
+</main>
+<div id="toast" class="toast"></div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const list = $('list');
+  let items = [];
+  const sentByMe = new Set(); // ids of items this page sent, so we don't offer to copy them back
+  let pending = null; // newest text from another device not yet copied here
+
+  function toast(msg) {
+    const t = $('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toast.timer);
+    toast.timer = setTimeout(() => t.classList.remove('show'), 1600);
+  }
+
+  function fmtSize(n) {
+    const u = ['B', 'KB', 'MB', 'GB'];
+    let i = 0;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (i ? n.toFixed(1) : n) + ' ' + u[i];
+  }
+
+  function fmtTime(t) {
+    const d = new Date(t);
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  // navigator.clipboard only works on HTTPS/localhost; fall back to execCommand on plain LAN HTTP.
+  async function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      try { await navigator.clipboard.writeText(text); return true; } catch {}
+    }
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch {}
+    ta.remove();
+    return ok;
+  }
+
+  function el(tag, props = {}, children = []) {
+    const e = document.createElement(tag);
+    Object.assign(e, props);
+    for (const c of [].concat(children)) e.append(c);
+    return e;
+  }
+
+  function render() {
+    list.replaceChildren(...items.slice().reverse().map(renderItem));
+    $('empty').style.display = items.length ? 'none' : '';
+  }
+
+  function renderItem(it) {
+    const meta = el('div', { className: 'meta', textContent: `${it.from} · ${fmtTime(it.time)}` });
+    const del = el('button', { className: 'link', textContent: '删除', onclick: () => api('DELETE', '/api/items/' + it.id) });
+    let body, actions;
+    if (it.type === 'text') {
+      body = el('div', { className: 'text', textContent: it.text });
+      actions = [
+        el('button', { className: 'primary', textContent: '复制', onclick: async () => toast((await copyText(it.text)) ? '已复制' : '复制失败，请长按文字手动复制') }),
+        del,
+      ];
+    } else {
+      const children = [];
+      if (/^image\//.test(it.mime)) children.push(el('img', { src: `/files/${it.id}?inline`, alt: '' }));
+      children.push(el('div', {}, [el('div', { className: 'fname', textContent: it.name }), el('div', { className: 'meta', textContent: fmtSize(it.size) })]));
+      body = el('div', { className: 'file' }, children);
+      actions = [
+        el('a', { className: 'btn', textContent: '下载', href: `/files/${it.id}`, download: it.name }),
+        el('a', { className: 'btn', textContent: '打开', href: `/files/${it.id}?inline`, target: '_blank' }),
+        del,
+      ];
+    }
+    return el('li', {}, [meta, body, el('div', { className: 'actions' }, actions)]);
+  }
+
+  async function api(method, url, body) {
+    const res = await fetch(url, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) toast((await res.json().catch(() => ({}))).error || '请求失败');
+    return res;
+  }
+
+  async function sendText() {
+    const text = $('text').value;
+    if (!text.trim()) return;
+    const res = await api('POST', '/api/text', { text });
+    if (res.ok) {
+      sentByMe.add((await res.json()).id);
+      $('text').value = '';
+    }
+  }
+
+  function offer(item) {
+    pending = item;
+    $('incoming-text').textContent = item.text;
+    $('incoming').classList.add('show');
+  }
+
+  function dismissOffer() {
+    pending = null;
+    $('incoming').classList.remove('show');
+  }
+
+  $('incoming').onclick = async () => {
+    if (!pending) return;
+    toast((await copyText(pending.text)) ? '已复制，可以直接粘贴了' : '复制失败，请长按文字手动复制');
+    dismissOffer();
+  };
+
+  function uploadFile(file) {
+    const row = el('div', { className: 'progress' }, [el('div', { textContent: file.name }), el('progress', { max: 100, value: 0 })]);
+    $('uploads').append(row);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/upload?name=' + encodeURIComponent(file.name));
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) row.lastChild.value = (e.loaded / e.total) * 100; };
+    xhr.onloadend = () => {
+      row.remove();
+      if (xhr.status !== 201) toast('上传失败：' + file.name);
+    };
+    xhr.send(file);
+  }
+
+  function uploadFiles(files) { [...files].forEach(uploadFile); }
+
+  $('send').onclick = sendText;
+  $('text').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); sendText(); }
+  });
+  $('pick').onclick = () => $('file').click();
+  $('file').onchange = (e) => { uploadFiles(e.target.files); e.target.value = ''; };
+  $('clear').onclick = () => { if (confirm('清空所有记录和文件？')) api('DELETE', '/api/items'); };
+
+  document.addEventListener('paste', (e) => {
+    const files = e.clipboardData && e.clipboardData.files;
+    if (files && files.length) { e.preventDefault(); uploadFiles(files); }
+  });
+  const composer = $('composer');
+  ['dragenter', 'dragover'].forEach((t) => document.addEventListener(t, (e) => { e.preventDefault(); composer.classList.add('drag'); }));
+  ['dragleave', 'drop'].forEach((t) => document.addEventListener(t, (e) => { e.preventDefault(); composer.classList.remove('drag'); }));
+  document.addEventListener('drop', (e) => { if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files); });
+
+  function connect() {
+    const es = new EventSource('/events');
+    es.addEventListener('init', (e) => {
+      items = JSON.parse(e.data);
+      render();
+      // Opening the page right after copying on the computer: offer the newest text if it's recent.
+      const latest = items.filter((i) => i.type === 'text').pop();
+      if (latest && !pending && Date.now() - latest.time < 5 * 60 * 1000) offer(latest);
+    });
+    es.addEventListener('add', (e) => {
+      const item = JSON.parse(e.data);
+      items.push(item);
+      render();
+      // The server pushes before our own POST resolves, so wait a tick before checking sentByMe.
+      if (item.type === 'text') setTimeout(() => { if (!sentByMe.has(item.id)) offer(item); }, 300);
+    });
+    es.addEventListener('remove', (e) => {
+      const { id } = JSON.parse(e.data);
+      items = items.filter((i) => i.id !== id);
+      if (pending && pending.id === id) dismissOffer();
+      render();
+    });
+    es.onopen = () => { $('dot').classList.add('on'); $('status').textContent = '已连接'; };
+    es.onerror = () => { $('dot').classList.remove('on'); $('status').textContent = '连接断开，重连中…'; };
+  }
+
+  // Drop the token from the address bar once the cookie is set.
+  if (location.search.includes('token=')) history.replaceState(null, '', '/');
+  fetch('/api/info').then((r) => r.json()).then((info) => { $('sync').hidden = !info.clipboardSync; }).catch(() => {});
+  connect();
+})();
+</script>
+</body>
+</html>
