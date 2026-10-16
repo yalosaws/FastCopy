@@ -5,7 +5,7 @@ const assert = require('node:assert');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
-const { createApp } = require('../server');
+const { createApp, lanAddresses } = require('../server');
 
 let server, base;
 const token = 'testtoken';
@@ -75,4 +75,17 @@ test('oversized upload is rejected', async () => {
     method: 'POST', headers: auth, body: Buffer.alloc(2048),
   });
   assert.strictEqual(res.status, 413);
+});
+
+test('lan addresses skip proxy adapters and prefer private ranges', () => {
+  const v4 = (address, internal = false) => ({ family: 'IPv4', address, internal });
+  const interfaces = {
+    Meta: [v4('198.18.0.1')],
+    Other: [v4('100.64.1.2'), { family: 'IPv6', address: 'fe80::1', internal: false }],
+    Docker: [v4('172.17.0.1')],
+    VPN: [v4('10.8.0.2'), v4('198.19.255.1')],
+    WLAN: [v4('192.168.3.8')],
+    Loopback: [v4('127.0.0.1', true)],
+  };
+  assert.deepStrictEqual(lanAddresses(interfaces), ['192.168.3.8', '10.8.0.2', '172.17.0.1', '100.64.1.2']);
 });

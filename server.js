@@ -316,14 +316,30 @@ function loadToken() {
   return token;
 }
 
-function lanAddresses() {
+// Lower rank = more likely to be the Wi-Fi address a phone can reach.
+function addressRank(ip) {
+  const [a, b] = ip.split('.').map(Number);
+  if (a === 192 && b === 168) return 0;
+  if (a === 10) return 1;
+  if (a === 172 && b >= 16 && b <= 31) return 2;
+  return 3;
+}
+
+// 198.18.0.0/15 is used by proxy TUN adapters (Clash / mihomo fake-ip), unreachable from the phone.
+function isProxyAddress(ip) {
+  const [a, b] = ip.split('.').map(Number);
+  return a === 198 && (b === 18 || b === 19);
+}
+
+function lanAddresses(interfaces = os.networkInterfaces()) {
   const result = [];
-  for (const list of Object.values(os.networkInterfaces())) {
+  for (const list of Object.values(interfaces)) {
     for (const addr of list || []) {
-      if (addr.family === 'IPv4' && !addr.internal) result.push(addr.address);
+      if (addr.family === 'IPv4' && !addr.internal && !isProxyAddress(addr.address)) result.push(addr.address);
     }
   }
-  return result;
+  // Stable sort keeps interface order within the same rank.
+  return result.sort((x, y) => addressRank(x) - addressRank(y));
 }
 
 if (require.main === module) {
@@ -350,4 +366,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createApp };
+module.exports = { createApp, lanAddresses };
