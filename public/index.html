@@ -55,6 +55,15 @@
   .fname { word-break: break-all; }
   .actions { display: flex; gap: 8px; margin-top: 10px; }
   .empty { text-align: center; color: var(--muted); padding: 32px 0; }
+  .incoming {
+    display: none; position: sticky; top: 8px; z-index: 5; width: 100%; margin-bottom: 12px; text-align: left;
+    background: var(--accent); color: var(--accent-text); border: 0; border-radius: 12px; padding: 14px 16px;
+    box-shadow: 0 6px 20px rgba(37, 99, 235, .35);
+  }
+  .incoming.show { display: block; }
+  .incoming b { display: block; font-size: 16px; margin-bottom: 4px; }
+  .incoming span { display: block; opacity: .9; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sync { font-size: 12px; color: var(--muted); margin: 8px 2px 0; }
   .toast {
     position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #111; color: #fff;
     padding: 8px 16px; border-radius: 999px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none;
@@ -69,6 +78,8 @@
     <span class="status"><span id="dot" class="dot"></span><span id="status">连接中…</span></span>
   </header>
 
+  <button id="incoming" class="incoming"><b>📋 收到新文字，点击复制</b><span id="incoming-text"></span></button>
+
   <section id="composer" class="composer">
     <textarea id="text" placeholder="输入或粘贴文字；也可以直接粘贴 / 拖入文件"></textarea>
     <div class="row">
@@ -79,6 +90,7 @@
     </div>
     <div id="uploads" class="uploads"></div>
   </section>
+  <p id="sync" class="sync" hidden>📋 电脑剪贴板同步已开启：在电脑上复制，这里自动出现；从这里发送，电脑上直接 Ctrl+V</p>
 
   <div class="list-head">
     <h2>最近记录</h2>
@@ -94,6 +106,8 @@
   const $ = (id) => document.getElementById(id);
   const list = $('list');
   let items = [];
+  const sentByMe = new Set(); // ids of items this page sent, so we don't offer to copy them back
+  let pending = null; // newest text from another device not yet copied here
 
   function toast(msg) {
     const t = $('toast');
@@ -183,8 +197,28 @@
     const text = $('text').value;
     if (!text.trim()) return;
     const res = await api('POST', '/api/text', { text });
-    if (res.ok) $('text').value = '';
+    if (res.ok) {
+      sentByMe.add((await res.json()).id);
+      $('text').value = '';
+    }
   }
+
+  function offer(item) {
+    pending = item;
+    $('incoming-text').textContent = item.text;
+    $('incoming').classList.add('show');
+  }
+
+  function dismissOffer() {
+    pending = null;
+    $('incoming').classList.remove('show');
+  }
+
+  $('incoming').onclick = async () => {
+    if (!pending) return;
+    toast((await copyText(pending.text)) ? '已复制，可以直接粘贴了' : '复制失败，请长按文字手动复制');
+    dismissOffer();
+  };
 
   function uploadFile(file) {
     const row = el('div', { className: 'progress' }, [el('div', { textContent: file.name }), el('progress', { max: 100, value: 0 })]);
@@ -221,15 +255,33 @@
 
   function connect() {
     const es = new EventSource('/events');
-    es.addEventListener('init', (e) => { items = JSON.parse(e.data); render(); });
-    es.addEventListener('add', (e) => { items.push(JSON.parse(e.data)); render(); });
-    es.addEventListener('remove', (e) => { const { id } = JSON.parse(e.data); items = items.filter((i) => i.id !== id); render(); });
+    es.addEventListener('init', (e) => {
+      items = JSON.parse(e.data);
+      render();
+      // Opening the page right after copying on the computer: offer the newest text if it's recent.
+      const latest = items.filter((i) => i.type === 'text').pop();
+      if (latest && !pending && Date.now() - latest.time < 5 * 60 * 1000) offer(latest);
+    });
+    es.addEventListener('add', (e) => {
+      const item = JSON.parse(e.data);
+      items.push(item);
+      render();
+      // The server pushes before our own POST resolves, so wait a tick before checking sentByMe.
+      if (item.type === 'text') setTimeout(() => { if (!sentByMe.has(item.id)) offer(item); }, 300);
+    });
+    es.addEventListener('remove', (e) => {
+      const { id } = JSON.parse(e.data);
+      items = items.filter((i) => i.id !== id);
+      if (pending && pending.id === id) dismissOffer();
+      render();
+    });
     es.onopen = () => { $('dot').classList.add('on'); $('status').textContent = '已连接'; };
     es.onerror = () => { $('dot').classList.remove('on'); $('status').textContent = '连接断开，重连中…'; };
   }
 
   // Drop the token from the address bar once the cookie is set.
   if (location.search.includes('token=')) history.replaceState(null, '', '/');
+  fetch('/api/info').then((r) => r.json()).then((info) => { $('sync').hidden = !info.clipboardSync; }).catch(() => {});
   connect();
 })();
 </script>

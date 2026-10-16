@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { systemClipboard } = require('./clipboard');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const MAX_ITEMS = 200;
@@ -14,6 +15,9 @@ function createApp(options = {}) {
   const token = options.token || crypto.randomBytes(6).toString('hex');
   const uploadDir = options.uploadDir || path.join(__dirname, 'uploads');
   const maxUploadBytes = options.maxUploadBytes || 2 * 1024 * 1024 * 1024; // 2 GB
+  // { read(), write(text) } for the computer's clipboard, or null to disable syncing.
+  const clipboard = options.clipboard === undefined ? systemClipboard() : options.clipboard;
+  const clipboardInterval = options.clipboardInterval || 800;
 
   fs.rmSync(uploadDir, { recursive: true, force: true });
   fs.mkdirSync(uploadDir, { recursive: true });
@@ -44,6 +48,49 @@ function createApp(options = {}) {
 
   function newId() {
     return Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
+  }
+
+  // --- Computer clipboard sync -------------------------------------------
+  // Copying on the computer adds a text item; text sent from any device lands on the computer's clipboard.
+  let lastClip = null; // last clipboard text we saw or wrote, so we don't echo our own writes
+  let polling = false;
+  let clipTimer = null;
+
+  async function pollClipboard() {
+    if (polling) return;
+    polling = true;
+    try {
+      const text = await clipboard.read();
+      if (lastClip === null) {
+        lastClip = text; // don't publish whatever happened to be on the clipboard at startup
+      } else if (text !== lastClip) {
+        lastClip = text;
+        const latest = latestText();
+        if (text.trim() && (!latest || latest.text !== text)) {
+          addItem({ id: newId(), type: 'text', text, from: '电脑剪贴板', time: Date.now() });
+        }
+      }
+    } catch {
+      // Clipboard temporarily unavailable (locked, non-text content, ...): try again next tick.
+    } finally {
+      polling = false;
+    }
+  }
+
+  function writeClipboard(text) {
+    if (!clipboard) return;
+    lastClip = text;
+    clipboard.write(text).catch((err) => console.error('写入电脑剪贴板失败：', err.message));
+  }
+
+  if (clipboard) {
+    clipTimer = setInterval(pollClipboard, clipboardInterval);
+    pollClipboard();
+  }
+
+  function latestText() {
+    for (let i = items.length - 1; i >= 0; i--) if (items[i].type === 'text') return items[i];
+    return null;
   }
 
   function deviceName(req) {
@@ -118,6 +165,18 @@ function createApp(options = {}) {
       return sendJson(res, 200, items);
     }
 
+    if (req.method === 'GET' && pathname === '/api/info') {
+      return sendJson(res, 200, { clipboardSync: Boolean(clipboard) });
+    }
+
+    // Plain-text latest item: for phone shortcuts (iOS Shortcuts, Android HTTP Shortcuts, curl...).
+    if (req.method === 'GET' && pathname === '/api/latest') {
+      const item = latestText();
+      if (!item) return res.writeHead(204).end();
+      res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(item.text);
+    }
+
     if (req.method === 'GET' && pathname === '/events') {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
@@ -135,10 +194,15 @@ function createApp(options = {}) {
     }
 
     if (req.method === 'POST' && pathname === '/api/text') {
-      const body = JSON.parse((await readBody(req, 5 * 1024 * 1024)).toString('utf8') || '{}');
-      const text = typeof body.text === 'string' ? body.text : '';
+      const raw = (await readBody(req, 5 * 1024 * 1024)).toString('utf8');
+      let text = raw; // plain-text bodies are accepted too, which keeps phone shortcuts simple
+      if (/json/.test(req.headers['content-type'] || '')) {
+        const body = JSON.parse(raw || '{}');
+        text = typeof body.text === 'string' ? body.text : '';
+      }
       if (!text.trim()) return sendJson(res, 400, { error: '内容为空' });
       const item = addItem({ id: newId(), type: 'text', text, from: deviceName(req), time: Date.now() });
+      writeClipboard(text);
       return sendJson(res, 201, item);
     }
 
@@ -216,7 +280,25 @@ function createApp(options = {}) {
     });
   });
 
-  return { server, token };
+  server.on('close', () => clearInterval(clipTimer));
+
+  return { server, token, clipboardSync: Boolean(clipboard) };
+}
+
+// Keep the token across restarts so bookmarks and phone shortcuts keep working.
+function loadToken() {
+  if (process.env.FASTCOPY_TOKEN) return process.env.FASTCOPY_TOKEN;
+  const file = path.join(os.homedir(), '.fastcopy', 'token');
+  try {
+    const saved = fs.readFileSync(file, 'utf8').trim();
+    if (saved) return saved;
+  } catch {}
+  const token = crypto.randomBytes(6).toString('hex');
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, token, { mode: 0o600 });
+  } catch {}
+  return token;
 }
 
 function lanAddresses() {
@@ -231,12 +313,19 @@ function lanAddresses() {
 
 if (require.main === module) {
   const port = Number(process.env.PORT) || 8080;
-  const { server, token } = createApp({ token: process.env.FASTCOPY_TOKEN });
+  const noClipboard = process.env.FASTCOPY_CLIPBOARD === '0';
+  const { server, token, clipboardSync } = createApp({ token: loadToken(), clipboard: noClipboard ? null : undefined });
   server.listen(port, '0.0.0.0', () => {
     const ips = lanAddresses();
     const urls = (ips.length ? ips : ['localhost']).map((ip) => `http://${ip}:${port}/?token=${token}`);
     console.log('\nFastCopy 已启动 🚀  手机与电脑需连接同一 Wi-Fi\n');
     urls.forEach((u) => console.log('  ' + u));
+    if (clipboardSync) {
+      console.log('\n📋 电脑剪贴板同步已开启：电脑上复制的文字会自动出现在手机上，手机发来的文字会自动进入电脑剪贴板');
+    } else if (!noClipboard) {
+      console.log('\n⚠️  未找到剪贴板工具，剪贴板同步未开启（Linux 请安装 xclip 或 wl-clipboard）');
+    }
+    console.log(`\n手机快捷指令地址（获取最新文字）：\n  ${urls[0].replace('/?token=', '/api/latest?token=')}`);
     console.log('\n用手机扫描二维码打开：\n');
     try {
       require('qrcode-terminal').generate(urls[0], { small: true });
