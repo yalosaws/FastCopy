@@ -30,7 +30,52 @@ npm start
 2. 手机扫描终端里的二维码
 3. 电脑浏览器打开终端里显示的同一地址
 
-## 电脑复制 → 手机粘贴
+## 手机 App：完全自动同步
+
+不想每次点一下？安装手机 App（源码在 [`app/`](app/)，Flutter 编写），打开后扫描电脑终端里的二维码即可。
+
+| | 电脑复制 → 手机粘贴 | 手机复制 → 电脑粘贴 |
+| --- | --- | --- |
+| **安卓** | ✅ 全自动，App 在后台也能同步 | 默认：打开 App / 点通知栏按钮 / 下拉快捷开关「发送剪贴板」；完成一次 adb 授权后 ✅ 全自动 |
+| **iPhone** | 打开 App 时自动同步 | 打开 App 时自动同步 |
+
+> iOS 不允许任何 App 在后台读写剪贴板，所以 iPhone 只能在打开 App 时同步（无需再点按钮）。
+
+### 下载安装
+
+每次推送代码后，GitHub Actions 会自动打包：进入仓库的 **Actions → App → 最新一次运行**，在页面底部 Artifacts 下载。
+
+- **安卓**：下载 `FastCopy-android`，解压得到 `FastCopy.apk`，传到手机安装（需允许「安装未知来源应用」）。
+- **iPhone**：下载 `FastCopy-ios-unsigned`，用 [Sideloadly](https://sideloadly.io/) 或 AltStore 以你的 Apple ID 签名安装。免费 Apple ID 签名 7 天有效，需定期重新签名；付费开发者账号（99 美元/年）有效期 1 年。
+
+### 安卓设置
+
+1. 打开 App，扫码连接电脑，打开「后台自动同步」
+2. 按提示允许**通知**和**不受电池优化限制**（否则可能被系统杀掉；小米 / 华为等还需在系统设置里允许「自启动」「后台运行」）
+3. （可选）手机 → 电脑也全自动：
+   - 在 App 中点「允许显示在其他应用上层」
+   - 手机开启 USB 调试并连上电脑，执行一次：
+     ```bash
+     adb shell pm grant com.fastcopy.fastcopy android.permission.READ_LOGS
+     ```
+   - 关闭再打开「后台自动同步」。Android 13 及以上首次会弹出「允许访问所有设备日志」，请选择允许。
+
+   原理：Android 10 起系统禁止后台应用读取剪贴板，但每次拒绝时会写一条系统日志。App 监听到这条日志后，短暂弹出一个透明页面读取剪贴板并发送（与 KDE Connect 相同的做法）。这个模式依赖各厂商系统的实现，部分机型上可能无效。
+
+### iPhone 设置
+
+在「设置 → FastCopy → 从其他 App 粘贴」中选择**允许**，否则每次打开 App 都会弹出粘贴确认。
+
+### 自己编译
+
+```bash
+cd app
+flutter pub get
+flutter run            # 连接手机调试
+flutter build apk      # 打包安卓
+```
+
+## 电脑复制 → 手机粘贴（网页版）
 
 服务启动后会自动监听**电脑剪贴板**（Windows / macOS 开箱即用；Linux 需要安装 `xclip` 或 `wl-clipboard`）。
 
@@ -80,7 +125,8 @@ npm start
 ## 开发
 
 ```bash
-npm test
+npm test                 # 服务端
+cd app && flutter test   # 手机 App
 ```
 
 项目结构：
@@ -89,6 +135,7 @@ npm test
 server.js          # HTTP 服务：API、文件存储、SSE 实时推送、剪贴板同步
 clipboard.js       # 读写电脑系统剪贴板（Windows / macOS / Linux）
 public/index.html  # 前端页面（无构建步骤）
+app/               # 手机 App（Flutter；安卓后台同步为原生 Kotlin：app/android/.../SyncService.kt）
 test/              # 基于 node:test 的接口测试
 ```
 

@@ -93,7 +93,21 @@ function createApp(options = {}) {
     return null;
   }
 
+  // Optional id a client sends with its writes, so it can recognise (and skip) its own items.
+  function clientId(req) {
+    const id = String(req.headers['x-fastcopy-client'] || '');
+    return /^[\w-]{1,64}$/.test(id) ? id : undefined;
+  }
+
   function deviceName(req) {
+    const named = String(req.headers['x-fastcopy-device'] || '').trim();
+    if (named) {
+      try {
+        return decodeURIComponent(named).slice(0, 40);
+      } catch {
+        // malformed encoding: fall back to the user agent
+      }
+    }
     const ua = req.headers['user-agent'] || '';
     if (/iPhone|iPad/i.test(ua)) return 'iPhone/iPad';
     if (/Android/i.test(ua)) return 'Android';
@@ -201,7 +215,7 @@ function createApp(options = {}) {
         text = typeof body.text === 'string' ? body.text : '';
       }
       if (!text.trim()) return sendJson(res, 400, { error: '内容为空' });
-      const item = addItem({ id: newId(), type: 'text', text, from: deviceName(req), time: Date.now() });
+      const item = addItem({ id: newId(), type: 'text', text, from: deviceName(req), client: clientId(req), time: Date.now() });
       writeClipboard(text);
       return sendJson(res, 201, item);
     }
@@ -240,6 +254,7 @@ function createApp(options = {}) {
           size,
           mime: req.headers['content-type'] || 'application/octet-stream',
           from: deviceName(req),
+          client: clientId(req),
           time: Date.now(),
         });
         sendJson(res, 201, item);

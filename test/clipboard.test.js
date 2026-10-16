@@ -72,3 +72,14 @@ test('whitespace-only clipboard is ignored', async () => {
   await wait(80);
   assert.strictEqual((await getItems()).length, before);
 });
+
+test('client id and device name are recorded on items', async () => {
+  const res = await fetch(`${base}/api/text`, {
+    method: 'POST',
+    headers: { ...auth, 'Content-Type': 'text/plain', 'X-FastCopy-Client': 'abc-123', 'X-FastCopy-Device': encodeURIComponent('我的手机') },
+    body: 'from app',
+  });
+  const item = await res.json();
+  assert.strictEqual(item.client, 'abc-123');
+  assert.strictEqual(item.from, '我的手机');
+});
