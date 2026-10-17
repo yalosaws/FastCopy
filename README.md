@@ -155,4 +155,4 @@ test/              # 基于 node:test 的接口测试
 
 ## License
 
-MIT
+[MIT](LICENSE)
